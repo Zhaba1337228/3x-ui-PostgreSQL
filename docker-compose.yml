@@ -1,8 +1,6 @@
 services:
   3xui:
-    build:
-      context: .
-      dockerfile: ./Dockerfile
+    image: ghcr.io/zhaba1337228/3x-ui:latest
     container_name: 3xui_app
     # hostname: yourhostname <- optional
     volumes:
