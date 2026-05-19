@@ -744,35 +744,81 @@ config_after_update() {
     fi
 }
 
+_install_go_upd() {
+    echo -e "${yellow}Go not found, installing...${plain}"
+    case "${release}" in
+        ubuntu | debian | armbian)
+            apt-get install -y -q golang
+        ;;
+        fedora | amzn | virtuozzo | rhel | almalinux | rocky | ol | centos)
+            dnf install -y -q golang 2>/dev/null || yum install -y golang
+        ;;
+        arch | manjaro | parch)
+            pacman -Sy --noconfirm go
+        ;;
+        alpine)
+            apk add --no-cache go
+        ;;
+        *)
+            apt-get install -y -q golang
+        ;;
+    esac
+    command -v go &>/dev/null || _fail "Failed to install Go. Please install it manually and re-run."
+}
+
+_build_x-ui_upd() {
+    echo -e "${green}Building x-ui from source: ${cur_dir}${plain}"
+
+    command -v go &>/dev/null || _install_go_upd
+
+    cd "${cur_dir}"
+    CGO_ENABLED=1 CGO_CFLAGS="-D_LARGEFILE64_SOURCE" \
+        go build -ldflags "-w -s" -o build/x-ui main.go
+    [[ $? -ne 0 ]] && _fail "Build failed. Check Go errors above."
+
+    local XRAY_VERSION="v26.2.6"
+    local xray_arch xray_fname
+    case "$(arch)" in
+        amd64)  xray_arch="64";        xray_fname="amd64" ;;
+        386)    xray_arch="32";        xray_fname="i386"  ;;
+        arm64)  xray_arch="arm64-v8a"; xray_fname="arm64" ;;
+        armv7)  xray_arch="arm32-v7a"; xray_fname="arm32" ;;
+        armv6)  xray_arch="arm32-v6";  xray_fname="armv6" ;;
+        *)      xray_arch="64";        xray_fname="amd64" ;;
+    esac
+    echo -e "${green}Downloading xray-core ${XRAY_VERSION} (${xray_fname})...${plain}"
+    mkdir -p "${cur_dir}/build/bin"
+    ${curl_bin} -sfLRo /tmp/xray.zip \
+        "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-${xray_arch}.zip"
+    [[ $? -ne 0 ]] && _fail "Failed to download xray-core"
+    unzip -o /tmp/xray.zip xray -d /tmp/xray-bin/ >/dev/null
+    mv -f /tmp/xray-bin/xray "${cur_dir}/build/bin/xray-linux-${xray_fname}"
+    rm -rf /tmp/xray.zip /tmp/xray-bin/
+
+    echo -e "${green}Downloading geo data...${plain}"
+    cd "${cur_dir}/build/bin"
+    ${curl_bin} -sfLRo geoip.dat      https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat
+    ${curl_bin} -sfLRo geosite.dat    https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat
+    ${curl_bin} -sfLRo geoip_IR.dat   https://github.com/chocolate4u/Iran-v2ray-rules/releases/latest/download/geoip.dat
+    ${curl_bin} -sfLRo geosite_IR.dat https://github.com/chocolate4u/Iran-v2ray-rules/releases/latest/download/geosite.dat
+    ${curl_bin} -sfLRo geoip_RU.dat   https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat
+    ${curl_bin} -sfLRo geosite_RU.dat https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat
+
+    UPD_XRAY_FNAME="${xray_fname}"
+    cd "${cur_dir}"
+}
+
 update_x-ui() {
     cd ${xui_folder%/x-ui}/
-    
+
     if [ -f "${xui_folder}/x-ui" ]; then
         current_xui_version=$(${xui_folder}/x-ui -v)
         echo -e "${green}Current x-ui version: ${current_xui_version}${plain}"
     else
         _fail "ERROR: Current x-ui version: unknown"
     fi
-    
-    echo -e "${green}Downloading new x-ui version...${plain}"
-    
-    tag_version=$(${curl_bin} -Ls "https://api.github.com/repos/MHSanaei/3x-ui/releases/latest" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    if [[ ! -n "$tag_version" ]]; then
-        echo -e "${yellow}Trying to fetch version with IPv4...${plain}"
-        tag_version=$(${curl_bin} -4 -Ls "https://api.github.com/repos/MHSanaei/3x-ui/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-        if [[ ! -n "$tag_version" ]]; then
-            _fail "ERROR: Failed to fetch x-ui version, it may be due to GitHub API restrictions, please try it later"
-        fi
-    fi
-    echo -e "Got x-ui latest version: ${tag_version}, beginning the installation..."
-    ${curl_bin} -fLRo ${xui_folder}-linux-$(arch).tar.gz https://github.com/MHSanaei/3x-ui/releases/download/${tag_version}/x-ui-linux-$(arch).tar.gz 2>/dev/null
-    if [[ $? -ne 0 ]]; then
-        echo -e "${yellow}Trying to fetch version with IPv4...${plain}"
-        ${curl_bin} -4fLRo ${xui_folder}-linux-$(arch).tar.gz https://github.com/MHSanaei/3x-ui/releases/download/${tag_version}/x-ui-linux-$(arch).tar.gz 2>/dev/null
-        if [[ $? -ne 0 ]]; then
-            _fail "ERROR: Failed to download x-ui, please be sure that your server can access GitHub"
-        fi
-    fi
+
+    _build_x-ui_upd
     
     if [[ -e ${xui_folder}/ ]]; then
         echo -e "${green}Stopping x-ui...${plain}"
@@ -817,29 +863,27 @@ update_x-ui() {
     fi
     
     echo -e "${green}Installing new x-ui version...${plain}"
-    tar zxvf x-ui-linux-$(arch).tar.gz >/dev/null 2>&1
-    rm x-ui-linux-$(arch).tar.gz -f >/dev/null 2>&1
-    cd x-ui >/dev/null 2>&1
-    chmod +x x-ui >/dev/null 2>&1
-    
-    # Check the system's architecture and rename the file accordingly
+    mkdir -p "${xui_folder}/bin"
+    cp -f "${cur_dir}/build/x-ui"                               "${xui_folder}/x-ui"
+    cp -f "${cur_dir}/build/bin/xray-linux-${UPD_XRAY_FNAME}"  "${xui_folder}/bin/"
+    cp -f "${cur_dir}/build/bin/"*.dat                          "${xui_folder}/bin/" 2>/dev/null || true
+    cp -f "${cur_dir}/x-ui.sh"                                  "${xui_folder}/x-ui.sh"
+    cp -f "${cur_dir}/x-ui.service.debian"                      "${xui_folder}/" 2>/dev/null || true
+    cp -f "${cur_dir}/x-ui.service.arch"                        "${xui_folder}/" 2>/dev/null || true
+    cp -f "${cur_dir}/x-ui.service.rhel"                        "${xui_folder}/" 2>/dev/null || true
+    cp -f "${cur_dir}/x-ui.rc"                                  "${xui_folder}/" 2>/dev/null || true
+
+    cd "${xui_folder}" >/dev/null 2>&1
+
+    # Rename xray binary for arm variants
     if [[ $(arch) == "armv5" || $(arch) == "armv6" || $(arch) == "armv7" ]]; then
-        mv bin/xray-linux-$(arch) bin/xray-linux-arm >/dev/null 2>&1
+        mv "bin/xray-linux-${UPD_XRAY_FNAME}" bin/xray-linux-arm >/dev/null 2>&1
         chmod +x bin/xray-linux-arm >/dev/null 2>&1
     fi
-    
-    chmod +x x-ui bin/xray-linux-$(arch) >/dev/null 2>&1
-    
-    echo -e "${green}Downloading and installing x-ui.sh script...${plain}"
-    ${curl_bin} -fLRo /usr/bin/x-ui https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.sh >/dev/null 2>&1
-    if [[ $? -ne 0 ]]; then
-        echo -e "${yellow}Trying to fetch x-ui with IPv4...${plain}"
-        ${curl_bin} -4fLRo /usr/bin/x-ui https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.sh >/dev/null 2>&1
-        if [[ $? -ne 0 ]]; then
-            _fail "ERROR: Failed to download x-ui.sh script, please be sure that your server can access GitHub"
-        fi
-    fi
-    
+    chmod +x x-ui x-ui.sh "bin/xray-linux-${UPD_XRAY_FNAME}" >/dev/null 2>&1
+
+    echo -e "${green}Installing x-ui management CLI...${plain}"
+    cp -f "${cur_dir}/x-ui.sh" /usr/bin/x-ui
     chmod +x ${xui_folder}/x-ui.sh >/dev/null 2>&1
     chmod +x /usr/bin/x-ui >/dev/null 2>&1
     mkdir -p /var/log/x-ui >/dev/null 2>&1
@@ -853,13 +897,10 @@ update_x-ui() {
     fi
     
     if [[ $release == "alpine" ]]; then
-        echo -e "${green}Downloading and installing startup unit x-ui.rc...${plain}"
-        ${curl_bin} -fLRo /etc/init.d/x-ui https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.rc >/dev/null 2>&1
+        echo -e "${green}Installing startup unit x-ui.rc from source...${plain}"
+        cp -f "${cur_dir}/x-ui.rc" /etc/init.d/x-ui
         if [[ $? -ne 0 ]]; then
-            ${curl_bin} -4fLRo /etc/init.d/x-ui https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.rc >/dev/null 2>&1
-            if [[ $? -ne 0 ]]; then
-                _fail "ERROR: Failed to download startup unit x-ui.rc, please be sure that your server can access GitHub"
-            fi
+            _fail "ERROR: Failed to install startup unit x-ui.rc from source"
         fi
         chmod +x /etc/init.d/x-ui >/dev/null 2>&1
         chown root:root /etc/init.d/x-ui >/dev/null 2>&1
@@ -905,23 +946,23 @@ update_x-ui() {
                 ;;
             esac
             
-            # If service file not found in tar.gz, download from GitHub
+            # If service file not in install dir, copy from source
             if [ "$service_installed" = false ]; then
-                echo -e "${yellow}Service files not found in tar.gz, downloading from GitHub...${plain}"
+                echo -e "${yellow}Copying service file from source...${plain}"
                 case "${release}" in
                     ubuntu | debian | armbian)
-                        ${curl_bin} -4fLRo ${xui_service}/x-ui.service https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.service.debian >/dev/null 2>&1
+                        cp -f "${cur_dir}/x-ui.service.debian" ${xui_service}/x-ui.service >/dev/null 2>&1
                     ;;
                     arch | manjaro | parch)
-                        ${curl_bin} -4fLRo ${xui_service}/x-ui.service https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.service.arch >/dev/null 2>&1
+                        cp -f "${cur_dir}/x-ui.service.arch" ${xui_service}/x-ui.service >/dev/null 2>&1
                     ;;
                     *)
-                        ${curl_bin} -4fLRo ${xui_service}/x-ui.service https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.service.rhel >/dev/null 2>&1
+                        cp -f "${cur_dir}/x-ui.service.rhel" ${xui_service}/x-ui.service >/dev/null 2>&1
                     ;;
                 esac
-                
+
                 if [[ $? -ne 0 ]]; then
-                    echo -e "${red}Failed to install x-ui.service from GitHub${plain}"
+                    echo -e "${red}Failed to install x-ui.service from source${plain}"
                     exit 1
                 fi
             fi
@@ -935,7 +976,7 @@ update_x-ui() {
     
     config_after_update
     
-    echo -e "${green}x-ui ${tag_version}${plain} updating finished, it is running now..."
+    echo -e "${green}x-ui${plain} update finished, it is running now..."
     echo -e ""
     echo -e "┌───────────────────────────────────────────────────────┐
 │  ${blue}x-ui control menu usages (subcommands):${plain}              │
