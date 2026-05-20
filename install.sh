@@ -1195,7 +1195,9 @@ config_after_install() {
             ${xui_folder}/x-ui migrate
             return 0
         fi
-        echo -e "${yellow}Proceeding with new configuration...${plain}"
+        # User chose n — force full reconfiguration regardless of what is in DB
+        echo -e "${yellow}Proceeding with full reconfiguration...${plain}"
+        local force_reconfigure=true
     fi
     # ── end NEW ─────────────────────────────────────────────────────────────────
 
@@ -1217,9 +1219,10 @@ config_after_install() {
             break
         fi
     done
-    
-    if [[ ${#existing_webBasePath} -lt 4 ]]; then
-        if [[ "$existing_hasDefaultCredential" == "true" ]]; then
+
+    # force_reconfigure=true means user explicitly chose to reconfigure — run full setup
+    if [[ "${force_reconfigure}" == "true" || ${#existing_webBasePath} -lt 4 ]]; then
+        if [[ "${force_reconfigure}" == "true" || "$existing_hasDefaultCredential" == "true" ]]; then
             local config_webBasePath=$(gen_random_string 18)
             local config_username=$(gen_random_string 10)
             local config_password=$(gen_random_string 10)
@@ -1292,8 +1295,11 @@ config_after_install() {
             echo -e "${green}Password: ${config_password}${plain}"
             echo -e "###############################################"
         else
+            # Settings are fine and user did not choose to reconfigure
             echo -e "${green}Username, Password, and WebBasePath are properly set.${plain}"
         fi
+        # force_reconfigure should never reach here (handled above), but guard anyway
+        [[ "${force_reconfigure}" == "true" ]] && return 0
 
         # Existing install: if no cert configured, prompt user for SSL setup
         # Properly detect empty cert by checking if cert: line exists and has content after it
