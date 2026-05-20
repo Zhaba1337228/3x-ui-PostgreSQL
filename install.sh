@@ -1148,6 +1148,57 @@ config_after_install() {
     local existing_port=$(${xui_folder}/x-ui setting -show true | grep -Eo 'port: .+' | awk '{print $2}')
     # Properly detect empty cert by checking if cert: line exists and has content after it
     local existing_cert=$(${xui_folder}/x-ui setting -getCert true | grep 'cert:' | awk -F': ' '{print $2}' | tr -d '[:space:]')
+
+    # ── NEW: offer to keep existing DB settings as-is ──────────────────────────
+    # If the database already has custom credentials AND a proper webBasePath we
+    # assume it was previously configured and ask the user what they want to do.
+    if [[ "$existing_hasDefaultCredential" == "false" && ${#existing_webBasePath} -ge 4 ]]; then
+        echo ""
+        echo -e "${green}═══════════════════════════════════════════${plain}"
+        echo -e "${green}   Existing configuration found in DB      ${plain}"
+        echo -e "${green}═══════════════════════════════════════════${plain}"
+        echo -e "${yellow}Port:        ${existing_port}${plain}"
+        echo -e "${yellow}WebBasePath: /${existing_webBasePath}${plain}"
+        if [[ -n "${existing_cert}" ]]; then
+            echo -e "${yellow}SSL cert:    ${existing_cert}${plain}"
+        else
+            echo -e "${yellow}SSL cert:    not configured${plain}"
+        fi
+        echo ""
+        read -rp "Use existing settings from the database without changes? [y/n]: " use_existing
+        if [[ "${use_existing}" == "y" || "${use_existing}" == "Y" ]]; then
+            echo -e "${green}Keeping existing database settings.${plain}"
+            # Determine access URL
+            local URL_lists_tmp=(
+                "https://api4.ipify.org"
+                "https://ipv4.icanhazip.com"
+                "https://v4.api.ipinfo.io/ip"
+            )
+            local server_ip_tmp=""
+            for ip_address in "${URL_lists_tmp[@]}"; do
+                local response=$(curl -s -w "\n%{http_code}" --max-time 3 "${ip_address}" 2>/dev/null)
+                local http_code=$(echo "$response" | tail -n1)
+                local ip_result=$(echo "$response" | head -n-1 | tr -d '[:space:]')
+                if [[ "${http_code}" == "200" && -n "${ip_result}" ]]; then
+                    server_ip_tmp="${ip_result}"
+                    break
+                fi
+            done
+            local proto="https"
+            [[ -z "${existing_cert}" ]] && proto="http"
+            echo ""
+            echo -e "${green}═══════════════════════════════════════════${plain}"
+            echo -e "${green}     Panel is ready!                       ${plain}"
+            echo -e "${green}═══════════════════════════════════════════${plain}"
+            echo -e "${green}Access URL:  ${proto}://${server_ip_tmp}:${existing_port}/${existing_webBasePath}${plain}"
+            echo -e "${green}═══════════════════════════════════════════${plain}"
+            ${xui_folder}/x-ui migrate
+            return 0
+        fi
+        echo -e "${yellow}Proceeding with new configuration...${plain}"
+    fi
+    # ── end NEW ─────────────────────────────────────────────────────────────────
+
     local URL_lists=(
         "https://api4.ipify.org"
         "https://ipv4.icanhazip.com"
@@ -1289,6 +1340,87 @@ _install_go() {
     fi
 }
 
+# download_with_retry <url> <dest> [max_attempts]
+# Downloads a file with automatic retry on failure.
+download_with_retry() {
+    local url="$1"
+    local dest="$2"
+    local max_attempts="${3:-5}"
+    local attempt=1
+    while [[ ${attempt} -le ${max_attempts} ]]; do
+        echo -e "${yellow}Downloading (attempt ${attempt}/${max_attempts}): ${url}${plain}"
+        if curl -fLRo "${dest}" --connect-timeout 15 --retry 3 --retry-delay 3 "${url}"; then
+            return 0
+        fi
+        echo -e "${red}Attempt ${attempt} failed, retrying...${plain}"
+        sleep 3
+        ((attempt++))
+    done
+    echo -e "${red}Failed to download after ${max_attempts} attempts: ${url}${plain}"
+    return 1
+}
+
+_download_xray() {
+    local xray_version="${1:-v26.2.6}"
+    local xray_arch xray_fname
+    case "$(arch)" in
+        amd64)  xray_arch="64";        xray_fname="amd64" ;;
+        386)    xray_arch="32";        xray_fname="i386"  ;;
+        arm64)  xray_arch="arm64-v8a"; xray_fname="arm64" ;;
+        armv7)  xray_arch="arm32-v7a"; xray_fname="arm32" ;;
+        armv6)  xray_arch="arm32-v6";  xray_fname="armv6" ;;
+        *)      xray_arch="64";        xray_fname="amd64" ;;
+    esac
+
+    local dest_dir="${1:+${xui_folder}/bin}"
+    [[ -z "${dest_dir}" ]] && dest_dir="${xui_folder}/bin"
+    # Allow caller to override dest via second arg
+    [[ -n "$2" ]] && dest_dir="$2"
+
+    echo -e "${green}Downloading xray-core ${xray_version} (${xray_fname})...${plain}"
+    mkdir -p "${dest_dir}"
+
+    download_with_retry \
+        "https://github.com/XTLS/Xray-core/releases/download/${xray_version}/Xray-linux-${xray_arch}.zip" \
+        /tmp/xray.zip || return 1
+
+    unzip -o /tmp/xray.zip xray -d /tmp/xray-bin/ >/dev/null
+    mv -f /tmp/xray-bin/xray "${dest_dir}/xray-linux-${xray_fname}"
+    chmod +x "${dest_dir}/xray-linux-${xray_fname}"
+    rm -rf /tmp/xray.zip /tmp/xray-bin/
+
+    echo -e "${green}xray-core downloaded: ${dest_dir}/xray-linux-${xray_fname}${plain}"
+    XUI_XRAY_FNAME="${xray_fname}"
+    return 0
+}
+
+_ensure_xray() {
+    # Checks if xray binary is present in xui_folder/bin; downloads if missing.
+    local xray_version="${XRAY_VERSION:-v26.2.6}"
+    local xray_fname
+    case "$(arch)" in
+        amd64)  xray_fname="amd64" ;;
+        386)    xray_fname="i386"  ;;
+        arm64)  xray_fname="arm64" ;;
+        armv7)  xray_fname="arm32" ;;
+        armv6)  xray_fname="armv6" ;;
+        *)      xray_fname="amd64" ;;
+    esac
+
+    local xray_bin="${xui_folder}/bin/xray-linux-${xray_fname}"
+    if [[ -x "${xray_bin}" ]]; then
+        echo -e "${green}xray-core already present: ${xray_bin}${plain}"
+        XUI_XRAY_FNAME="${xray_fname}"
+        return 0
+    fi
+
+    echo -e "${yellow}xray-core not found, downloading automatically...${plain}"
+    _download_xray "${xray_version}" "${xui_folder}/bin" || {
+        echo -e "${red}Failed to download xray-core. Please check your internet connection.${plain}"
+        return 1
+    }
+}
+
 _build_x-ui() {
     echo -e "${green}Building x-ui from source: ${SCRIPT_DIR}${plain}"
 
@@ -1312,26 +1444,27 @@ _build_x-ui() {
         armv6)  xray_arch="arm32-v6";  xray_fname="armv6" ;;
         *)      xray_arch="64";        xray_fname="amd64" ;;
     esac
-    echo -e "${green}Downloading xray-core ${XRAY_VERSION} (${xray_fname})...${plain}"
+
     mkdir -p "${SCRIPT_DIR}/build/bin"
-    curl -sfLRo /tmp/xray.zip \
-        "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-${xray_arch}.zip"
-    if [[ $? -ne 0 ]]; then
-        echo -e "${red}Failed to download xray-core${plain}"
-        exit 1
-    fi
+
+    download_with_retry \
+        "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-${xray_arch}.zip" \
+        /tmp/xray.zip || { echo -e "${red}Failed to download xray-core${plain}"; exit 1; }
+
     unzip -o /tmp/xray.zip xray -d /tmp/xray-bin/ >/dev/null
     mv -f /tmp/xray-bin/xray "${SCRIPT_DIR}/build/bin/xray-linux-${xray_fname}"
+    chmod +x "${SCRIPT_DIR}/build/bin/xray-linux-${xray_fname}"
     rm -rf /tmp/xray.zip /tmp/xray-bin/
+    echo -e "${green}xray-core ${XRAY_VERSION} downloaded successfully.${plain}"
 
     echo -e "${green}Downloading geo data...${plain}"
     cd "${SCRIPT_DIR}/build/bin"
-    curl -sfLRo geoip.dat      https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat
-    curl -sfLRo geosite.dat    https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat
-    curl -sfLRo geoip_IR.dat   https://github.com/chocolate4u/Iran-v2ray-rules/releases/latest/download/geoip.dat
-    curl -sfLRo geosite_IR.dat https://github.com/chocolate4u/Iran-v2ray-rules/releases/latest/download/geosite.dat
-    curl -sfLRo geoip_RU.dat   https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat
-    curl -sfLRo geosite_RU.dat https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat
+    download_with_retry https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat      geoip.dat
+    download_with_retry https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat    geosite.dat
+    download_with_retry https://github.com/chocolate4u/Iran-v2ray-rules/releases/latest/download/geoip.dat      geoip_IR.dat
+    download_with_retry https://github.com/chocolate4u/Iran-v2ray-rules/releases/latest/download/geosite.dat    geosite_IR.dat
+    download_with_retry https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geoip.dat   geoip_RU.dat
+    download_with_retry https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat geosite_RU.dat
 
     # export fname so caller can use it
     XUI_XRAY_FNAME="${xray_fname}"
@@ -1373,6 +1506,11 @@ install_x-ui() {
         chmod +x bin/xray-linux-arm
     fi
     chmod +x x-ui x-ui.sh "bin/xray-linux-${XUI_XRAY_FNAME}" 2>/dev/null || true
+
+    # Verify xray binary is present; auto-download if missing (e.g. connection dropped during build)
+    _ensure_xray || {
+        echo -e "${red}xray-core could not be installed. Panel will start but xray will not run.${plain}"
+    }
 
     # Install x-ui management CLI
     cp -f "${SCRIPT_DIR}/x-ui.sh" /usr/bin/x-ui

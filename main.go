@@ -25,6 +25,25 @@ import (
 	"github.com/op/go-logging"
 )
 
+// loadEnv loads environment variables from the system env file (/etc/default/x-ui etc.)
+// and optionally from a .env file in the current directory.
+// This ensures CLI commands have access to the same env vars as the systemd service
+// (e.g. XUI_DB_DRIVER=postgres, XUI_POSTGRES_DSN=...).
+func loadEnv() {
+	systemEnvFiles := []string{
+		"/etc/default/x-ui",
+		"/etc/sysconfig/x-ui",
+		"/etc/conf.d/x-ui",
+	}
+	for _, f := range systemEnvFiles {
+		if _, err := os.Stat(f); err == nil {
+			godotenv.Load(f)
+			break
+		}
+	}
+	godotenv.Load()
+}
+
 // runWebServer initializes and starts the web server for the 3x-ui panel.
 func runWebServer() {
 	log.Printf("Starting %v %v", config.GetName(), config.GetVersion())
@@ -44,7 +63,7 @@ func runWebServer() {
 		log.Fatalf("Unknown log level: %v", config.GetLogLevel())
 	}
 
-	godotenv.Load()
+	loadEnv()
 
 	err := database.InitDB(config.GetDBPath())
 	if err != nil {
@@ -131,6 +150,7 @@ func runWebServer() {
 
 // resetSetting resets all panel settings to their default values.
 func resetSetting() {
+	loadEnv()
 	err := database.InitDB(config.GetDBPath())
 	if err != nil {
 		fmt.Println("Failed to initialize database:", err)
@@ -149,6 +169,11 @@ func resetSetting() {
 // showSetting displays the current panel settings if show is true.
 func showSetting(show bool) {
 	if show {
+		loadEnv()
+		if err := database.InitDB(config.GetDBPath()); err != nil {
+			fmt.Println("Database initialization failed:", err)
+			return
+		}
 		settingService := service.SettingService{}
 		port, err := settingService.GetPort()
 		if err != nil {
@@ -198,6 +223,11 @@ func showSetting(show bool) {
 
 // updateTgbotEnableSts enables or disables the Telegram bot notifications based on the status parameter.
 func updateTgbotEnableSts(status bool) {
+	loadEnv()
+	if err := database.InitDB(config.GetDBPath()); err != nil {
+		fmt.Println("Database initialization failed:", err)
+		return
+	}
 	settingService := service.SettingService{}
 	currentTgSts, err := settingService.GetTgbotEnabled()
 	if err != nil {
@@ -218,6 +248,7 @@ func updateTgbotEnableSts(status bool) {
 
 // updateTgbotSetting updates Telegram bot settings including token, chat ID, and runtime schedule.
 func updateTgbotSetting(tgBotToken string, tgBotChatid string, tgBotRuntime string) {
+	loadEnv()
 	err := database.InitDB(config.GetDBPath())
 	if err != nil {
 		fmt.Println("Error initializing database:", err)
@@ -256,6 +287,7 @@ func updateTgbotSetting(tgBotToken string, tgBotChatid string, tgBotRuntime stri
 
 // updateSetting updates various panel settings including port, credentials, base path, listen IP, and two-factor authentication.
 func updateSetting(port int, username string, password string, webBasePath string, listenIP string, resetTwoFactor bool) {
+	loadEnv()
 	err := database.InitDB(config.GetDBPath())
 	if err != nil {
 		fmt.Println("Database initialization failed:", err)
@@ -315,6 +347,7 @@ func updateSetting(port int, username string, password string, webBasePath strin
 
 // updateCert updates the SSL certificate files for the panel.
 func updateCert(publicKey string, privateKey string) {
+	loadEnv()
 	err := database.InitDB(config.GetDBPath())
 	if err != nil {
 		fmt.Println(err)
@@ -358,6 +391,11 @@ func updateCert(publicKey string, privateKey string) {
 // GetCertificate displays the current SSL certificate settings if getCert is true.
 func GetCertificate(getCert bool) {
 	if getCert {
+		loadEnv()
+		if err := database.InitDB(config.GetDBPath()); err != nil {
+			fmt.Println("Database initialization failed:", err)
+			return
+		}
 		settingService := service.SettingService{}
 		certFile, err := settingService.GetCertFile()
 		if err != nil {
@@ -376,7 +414,11 @@ func GetCertificate(getCert bool) {
 // GetListenIP displays the current panel listen IP address if getListen is true.
 func GetListenIP(getListen bool) {
 	if getListen {
-
+		loadEnv()
+		if err := database.InitDB(config.GetDBPath()); err != nil {
+			fmt.Println("Database initialization failed:", err)
+			return
+		}
 		settingService := service.SettingService{}
 		ListenIP, err := settingService.GetListen()
 		if err != nil {
@@ -390,6 +432,7 @@ func GetListenIP(getListen bool) {
 
 // migrateDb performs database migration operations for the 3x-ui panel.
 func migrateDb() {
+	loadEnv()
 	inboundService := service.InboundService{}
 
 	err := database.InitDB(config.GetDBPath())
