@@ -2,6 +2,8 @@
 package websocket
 
 import (
+	"encoding/json"
+
 	"github.com/mhsanaei/3x-ui/v2/logger"
 	"github.com/mhsanaei/3x-ui/v2/web/global"
 )
@@ -40,12 +42,32 @@ func BroadcastTraffic(traffic any) {
 	}
 }
 
-// BroadcastInbounds broadcasts inbounds list update to all connected clients
+// BroadcastInbounds broadcasts inbounds list update to all connected clients.
+// If the serialized payload exceeds 900 KB we send a lightweight "refresh"
+// signal instead so the browser fetches data via the REST API. This prevents
+// 15+ MB messages being dropped when there are tens of thousands of clients.
 func BroadcastInbounds(inbounds any) {
 	hub := GetHub()
-	if hub != nil {
-		hub.Broadcast(MessageTypeInbounds, inbounds)
+	if hub == nil {
+		return
 	}
+
+	const softLimit = 900 * 1024 // 900 KB
+
+	// Probe-marshal to measure payload size before sending to the hub.
+	// The hub itself drops messages > 1 MB, so we intercept earlier and
+	// send a lightweight "refresh" signal instead of the full data.
+	raw, err := json.Marshal(inbounds)
+	if err != nil || len(raw) > softLimit {
+		if err == nil {
+			logger.Warningf("BroadcastInbounds: payload too large (%d bytes), sending refresh signal instead", len(raw))
+		}
+		// Send a lightweight refresh notification — browser reloads via REST
+		hub.Broadcast(MessageTypeInbounds, map[string]string{"action": "refresh"})
+		return
+	}
+
+	hub.Broadcast(MessageTypeInbounds, inbounds)
 }
 
 // BroadcastOutbounds broadcasts outbounds list update to all connected clients

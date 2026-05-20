@@ -965,8 +965,13 @@ func (s *ServerService) restoreBackupToCurrentDB(backup *DatabaseBackup) error {
 			}
 		}
 
+		// Use larger batch size for PostgreSQL to reduce round-trips on huge datasets
+		batchSize := 200
+		if database.IsPostgres() {
+			batchSize = 1000
+		}
 		insert := func(items any) error {
-			return tx.Session(&gorm.Session{CreateBatchSize: 200}).Create(items).Error
+			return tx.Session(&gorm.Session{CreateBatchSize: batchSize}).Create(items).Error
 		}
 
 		if len(backup.Users) > 0 {
